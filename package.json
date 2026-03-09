@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "playwright-core": "^1.58.2"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "tv:login": "node scripts/tradingview_automation.mjs login",
+    "tv:watchlist": "node scripts/tradingview_automation.mjs watchlist",
+    "tv:screener": "node scripts/tradingview_automation.mjs screener",
+    "tv:all": "node scripts/tradingview_automation.mjs all",
+    "tv:lists": "node scripts/tradingview_automation.mjs allwatchlists",
+    "tv:screens": "node scripts/tradingview_automation.mjs allscreeners",
+    "tv:ui": "node scripts/tradingview_ui.mjs"
+  }
+}

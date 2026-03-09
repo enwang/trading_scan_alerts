@@ -1,0 +1,7 @@
+.tradingview-profile/
+tv-output/
+.env
+node_modules/
+__pycache__/
+tests/__pycache__/
+*.pyc
