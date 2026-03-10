@@ -716,7 +716,10 @@ def run() -> int:
         # Symbols whose cooldown has expired, sorted most-urgent first.
         due = sorted(
             [sym for sym, st in symbol_states.items() if current_ts >= st.next_scan_at],
-            key=lambda s: symbol_states[s].interval,
+            # Primary: most urgent tier first (smallest interval).
+            # Tiebreak: longest waiting first (smallest next_scan_at) so no symbol
+            # starves when many tickers share the same tier and budget is limited.
+            key=lambda s: (symbol_states[s].interval, symbol_states[s].next_scan_at),
         )
 
         available = limiter.available()
