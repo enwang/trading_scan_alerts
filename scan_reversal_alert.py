@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 
 EASTERN = ZoneInfo("America/New_York")
+PACIFIC = ZoneInfo("America/Los_Angeles")
 ENV_PATH = Path(".env")
 
 # Scan interval tiers (seconds). Assigned dynamically based on how close a symbol
@@ -534,7 +535,7 @@ def format_alert(result: ScanResult, now: datetime) -> str:
     return (
         f"{result.symbol} intraday reversal alert\n"
         f"Date: {now.strftime('%Y-%m-%d')}\n"
-        f"Trigger time: {result.trigger_time.strftime('%H:%M:%S %Z')}\n"
+        f"Trigger time: {result.trigger_time.astimezone(PACIFIC).strftime('%H:%M:%S %Z')}\n"
         f"Trigger price: {result.trigger_price:.2f}\n"
         f"Premarket low: {result.premarket_low:.2f} ({result.premarket_drawdown_pct:.2f}% vs prev close)\n"
         f"Regular open: {result.regular_open:.2f}\n"
