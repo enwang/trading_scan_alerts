@@ -16,26 +16,13 @@ It uses Polygon minute bars for the setup check and can also build a candidate l
 python3 -m pip install -r requirements.txt
 ```
 
-2. Create a local `.env` file:
+2. Create a local `.env` file (secrets only):
 
 ```dotenv
 POLYGON_API_KEY=your-key
-REVERSAL_SCAN_LIST=NVDA,TSLA,PLTR
-TRADINGVIEW_WATCHLIST_ENABLED=false
-TRADINGVIEW_WATCHLIST_PATH=tv-output/watchlist.json
-TRADINGVIEW_WATCHLIST_REFRESH_COMMAND=npm run tv:watchlist
-TRADINGVIEW_WATCHLIST_REFRESH_SECONDS=900
-REVERSAL_PREFILTER_ENABLED=true
-REVERSAL_PREFILTER_DRAWDOWN_PCT=8
-REVERSAL_PREFILTER_MIN_PRICE=5
-REVERSAL_PREFILTER_MIN_VOLUME=500000
-REVERSAL_PREFILTER_MAX_SYMBOLS=150
-PREMARKET_DRAWDOWN_PCT=6
-REGULAR_SESSION_REBOUND_PCT=4
-MIN_REGULAR_SESSION_GAIN_PCT=3
-DISTANCE_TO_REFERENCE_PCT=1.5
-POLL_SECONDS=60
 ```
+
+Public/default runtime settings are now in code (watchlist refresh, thresholds, polling, prefilter, etc). Override any of them in `.env` only when needed.
 
 3. Optional Telegram alert:
 
@@ -116,8 +103,8 @@ To feed the reversal scanner automatically from your TradingView watchlist after
 
 1. Run `npm run tv:login`
 2. Log in to TradingView in the opened Chrome window, then press Enter in the terminal
-3. Set `TRADINGVIEW_WATCHLIST_ENABLED=true` in `.env`
-4. Leave `TRADINGVIEW_WATCHLIST_REFRESH_COMMAND=npm run tv:watchlist` so the scanner refreshes `tv-output/watchlist.json` automatically
+3. Run `python3 scan_reversal_alert.py` (watchlist refresh is enabled by default)
+4. Optional: set `TRADINGVIEW_WATCHLIST_ENABLED=false` in `.env` to disable automatic watchlist refresh
 
 Once that is done, `python3 scan_reversal_alert.py` will merge symbols from:
 
