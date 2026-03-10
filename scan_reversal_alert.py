@@ -26,19 +26,15 @@ ENV_PATH = Path(".env")
 class ScanConfig:
     polygon_api_key: str
     reversal_scan_list: tuple[str, ...]
-    tradingview_watchlist_enabled: bool = False
-    tradingview_watchlist_path: Path = Path("tv-output/watchlist.json")
-    tradingview_watchlist_refresh_command: str | None = None
-    tradingview_watchlist_refresh_seconds: int = 900
+    tradingview_screens_path: Path = Path("tv-output/all-screens.json")
+    tradingview_screens_refresh_command: str | None = None
+    postmarket_screener_name: str = "Post market gap down"
+    premarket_screener_name: str = "Pre market gap down"
+    scan_list_path: Path = Path("tv-output/scan-list.json")
     premarket_drawdown_pct: float = 6.0
     regular_session_rebound_pct: float = 4.0
     distance_to_reference_pct: float = 1.5
     min_regular_session_gain_pct: float = 3.0
-    prefilter_enabled: bool = True
-    prefilter_drawdown_pct: float = 8.0
-    prefilter_min_price: float = 5.0
-    prefilter_min_volume: int = 500_000
-    prefilter_max_symbols: int = 150
     poll_seconds: int = 60
     alert_webhook_url: str | None = None
     telegram_bot_token: str | None = None
@@ -86,13 +82,6 @@ class PolygonClient:
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{day}/{day}"
         data = self._get(url, {"adjusted": "true", "sort": "asc", "limit": 50000})
         return data.get("results", [])
-
-    def get_full_market_snapshot(self, include_otc: bool = False) -> list[dict[str, Any]]:
-        data = self._get(
-            "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
-            {"include_otc": str(include_otc).lower()},
-        )
-        return data.get("tickers", [])
 
     def get_grouped_daily_bars(self, day: datetime) -> list[dict[str, Any]]:
         day_str = day.date().isoformat()
@@ -164,19 +153,15 @@ def load_config() -> ScanConfig:
     return ScanConfig(
         polygon_api_key=api_key,
         reversal_scan_list=reversal_scan_list,
-        tradingview_watchlist_enabled=os.getenv("TRADINGVIEW_WATCHLIST_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
-        tradingview_watchlist_path=Path(os.getenv("TRADINGVIEW_WATCHLIST_PATH", "tv-output/watchlist.json")),
-        tradingview_watchlist_refresh_command=os.getenv("TRADINGVIEW_WATCHLIST_REFRESH_COMMAND", "").strip() or None,
-        tradingview_watchlist_refresh_seconds=int(os.getenv("TRADINGVIEW_WATCHLIST_REFRESH_SECONDS", "900")),
+        tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
+        tradingview_screens_refresh_command=os.getenv("TRADINGVIEW_SCREENS_REFRESH_COMMAND", "").strip() or None,
+        postmarket_screener_name=os.getenv("POSTMARKET_SCREENER_NAME", "Post market gap down"),
+        premarket_screener_name=os.getenv("PREMARKET_SCREENER_NAME", "Pre market gap down"),
+        scan_list_path=Path(os.getenv("SCAN_LIST_PATH", "tv-output/scan-list.json")),
         premarket_drawdown_pct=float(os.getenv("PREMARKET_DRAWDOWN_PCT", "6")),
         regular_session_rebound_pct=float(os.getenv("REGULAR_SESSION_REBOUND_PCT", "4")),
         distance_to_reference_pct=float(os.getenv("DISTANCE_TO_REFERENCE_PCT", "1.5")),
         min_regular_session_gain_pct=float(os.getenv("MIN_REGULAR_SESSION_GAIN_PCT", "3")),
-        prefilter_enabled=os.getenv("REVERSAL_PREFILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-        prefilter_drawdown_pct=float(os.getenv("REVERSAL_PREFILTER_DRAWDOWN_PCT", "8")),
-        prefilter_min_price=float(os.getenv("REVERSAL_PREFILTER_MIN_PRICE", "5")),
-        prefilter_min_volume=int(os.getenv("REVERSAL_PREFILTER_MIN_VOLUME", "500000")),
-        prefilter_max_symbols=int(os.getenv("REVERSAL_PREFILTER_MAX_SYMBOLS", "150")),
         poll_seconds=int(os.getenv("POLL_SECONDS", "60")),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", "").strip() or None,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None,
@@ -205,12 +190,155 @@ def load_dotenv(path: Path) -> None:
         os.environ[key] = value
 
 
+# ---------------------------------------------------------------------------
+# TradingView screener helpers
+# ---------------------------------------------------------------------------
+
+
+def refresh_tv_screens(config: ScanConfig) -> None:
+    if not config.tradingview_screens_refresh_command:
+        print("No TRADINGVIEW_SCREENS_REFRESH_COMMAND set; skipping screen refresh.", flush=True)
+        return
+    try:
+        subprocess.run(
+            shlex.split(config.tradingview_screens_refresh_command),
+            check=True,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"TradingView screens refresh command not found: {config.tradingview_screens_refresh_command}"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(
+            f"TradingView screens refresh failed with exit code {exc.returncode}"
+        ) from exc
+
+
+def load_screener_symbols(screener_name: str, screens_path: Path) -> tuple[str, ...]:
+    if not screens_path.exists():
+        raise ValueError(
+            f"TradingView screens file not found at {screens_path}. "
+            "Run `npm run tv:screens` first."
+        )
+    try:
+        payload = json.loads(screens_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"TradingView screens file is invalid JSON: {screens_path}") from exc
+
+    screeners = payload.get("screeners", [])
+    for screener in screeners:
+        if screener.get("name") == screener_name:
+            rows = screener.get("rows", [])
+            symbols: list[str] = []
+            for row in rows:
+                sym = row.get("symbol", "")
+                if sym:
+                    bare = sym.split(":")[-1] if ":" in sym else sym
+                    if bare:
+                        symbols.append(bare.upper())
+            return tuple(dict.fromkeys(symbols))
+
+    available = [s.get("name") for s in screeners]
+    raise ValueError(
+        f"Screener '{screener_name}' not found in {screens_path}. "
+        f"Available screeners: {available}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan list persistence (two-phase merged list)
+# ---------------------------------------------------------------------------
+
+
+def load_scan_list(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_scan_list(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def get_scan_list_symbols(path: Path) -> tuple[str, ...]:
+    data = load_scan_list(path)
+    postmarket_symbols: list[str] = data.get("postmarket", {}).get("symbols", [])
+    premarket_symbols: list[str] = data.get("premarket", {}).get("symbols", [])
+    return tuple(dict.fromkeys([*postmarket_symbols, *premarket_symbols]))
+
+
+def build_list_phase(phase: str, config: ScanConfig) -> None:
+    """Build (or merge into) the scan list from a TradingView screener.
+
+    phase="postmarket"  → runs at ~5PM after close; resets list with post-market gap-down results.
+    phase="premarket"   → runs at ~5:30AM; merges pre-market gap-down results into the list.
+    """
+    print(f"[{phase}] Refreshing TradingView screens...", flush=True)
+    refresh_tv_screens(config)
+
+    screener_name = (
+        config.postmarket_screener_name
+        if phase == "postmarket"
+        else config.premarket_screener_name
+    )
+    print(f"[{phase}] Loading screener '{screener_name}'...", flush=True)
+    symbols = load_screener_symbols(screener_name, config.tradingview_screens_path)
+    print(f"[{phase}] Found {len(symbols)} symbols: {', '.join(symbols)}", flush=True)
+
+    now_str = datetime.now(tz=EASTERN).isoformat()
+
+    if phase == "postmarket":
+        # Start fresh for the new trading day; clear any stale pre-market data.
+        data: dict[str, Any] = {
+            "postmarket": {"symbols": list(symbols), "built_at": now_str},
+            "premarket": {},
+        }
+    else:
+        data = load_scan_list(config.scan_list_path)
+        data["premarket"] = {"symbols": list(symbols), "built_at": now_str}
+        if "postmarket" not in data:
+            data["postmarket"] = {}
+
+    save_scan_list(config.scan_list_path, data)
+
+    total = get_scan_list_symbols(config.scan_list_path)
+    print(
+        f"[{phase}] Scan list saved → {config.scan_list_path} "
+        f"({len(total)} total symbols after merge)",
+        flush=True,
+    )
+
+
+def resolve_reversal_scan_list(config: ScanConfig) -> tuple[str, ...]:
+    """Return the symbols to scan: scan-list file + any manual overrides from env."""
+    scan_list_symbols = list(get_scan_list_symbols(config.scan_list_path))
+    manual_symbols = list(config.reversal_scan_list)
+    merged = tuple(dict.fromkeys([*scan_list_symbols, *manual_symbols]))
+    if not merged:
+        raise ValueError(
+            "Scan list is empty. Build it first:\n"
+            "  After market close (~5PM):    python scan_reversal_alert.py --build-list postmarket\n"
+            "  Before market open (~5:30AM): python scan_reversal_alert.py --build-list premarket"
+        )
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Scan logic
+# ---------------------------------------------------------------------------
+
+
 def evaluate_reversal_scan(
     symbol: str,
     previous_close: float,
     previous_high: float,
     bars: list[dict[str, Any]],
-    now: datetime,
     config: ScanConfig,
 ) -> ScanResult | None:
     if not bars:
@@ -288,18 +416,11 @@ def _is_regular_bar(timestamp_ms: int) -> bool:
     return start <= candle_time < end
 
 
-def _is_premarket(now: datetime) -> bool:
+def _is_market_hours(now: datetime) -> bool:
     local_now = now.astimezone(EASTERN)
-    start = local_now.replace(hour=4, minute=0, second=0, microsecond=0)
-    open_time = local_now.replace(hour=9, minute=30, second=0, microsecond=0)
-    return start <= local_now < open_time
-
-
-def _is_postmarket(now: datetime) -> bool:
-    local_now = now.astimezone(EASTERN)
-    close_time = local_now.replace(hour=16, minute=0, second=0, microsecond=0)
-    end = local_now.replace(hour=20, minute=0, second=0, microsecond=0)
-    return close_time <= local_now < end
+    start = local_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    end = local_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return start <= local_now < end
 
 
 def previous_business_day(day: datetime) -> datetime:
@@ -307,237 +428,6 @@ def previous_business_day(day: datetime) -> datetime:
     while candidate.weekday() >= 5:
         candidate -= timedelta(days=1)
     return candidate
-
-
-def previous_trading_date(client: PolygonClient, day: datetime, max_lookback_days: int = 10) -> datetime:
-    candidate = previous_business_day(day)
-    checked = 0
-    while checked < max_lookback_days:
-        try:
-            if client.get_grouped_daily_bars(candidate):
-                return candidate
-        except ValueError as exc:
-            if "HTTP 403" not in str(exc):
-                raise
-        candidate = previous_business_day(candidate)
-        checked += 1
-    raise ValueError("Could not resolve a previous trading day from grouped daily data")
-
-
-def latest_grouped_date_on_or_before(
-    client: PolygonClient,
-    day: datetime,
-    max_lookback_days: int = 10,
-) -> tuple[datetime, list[dict[str, Any]]]:
-    candidate = day
-    checked = 0
-    while checked <= max_lookback_days:
-        try:
-            bars = client.get_grouped_daily_bars(candidate)
-            if bars:
-                return candidate, bars
-        except ValueError as exc:
-            if "HTTP 403" not in str(exc):
-                raise
-        candidate = previous_business_day(candidate)
-        checked += 1
-    raise ValueError("Could not resolve a grouped daily data date")
-
-
-def build_prefilter_symbol_list(client: PolygonClient, config: ScanConfig, now: datetime) -> tuple[str, ...]:
-    return tuple(item["symbol"] for item in build_prefilter_candidates(client, config, now))
-
-
-def maybe_refresh_tradingview_watchlist(config: ScanConfig) -> None:
-    if not config.tradingview_watchlist_enabled or not config.tradingview_watchlist_refresh_command:
-        return
-
-    watchlist_path = config.tradingview_watchlist_path
-    if watchlist_path.exists():
-        age_seconds = time.time() - watchlist_path.stat().st_mtime
-        if age_seconds < config.tradingview_watchlist_refresh_seconds:
-            return
-
-    try:
-        subprocess.run(
-            shlex.split(config.tradingview_watchlist_refresh_command),
-            check=True,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-    except FileNotFoundError as exc:
-        raise ValueError(
-            f"TradingView watchlist refresh command not found: {config.tradingview_watchlist_refresh_command}"
-        ) from exc
-    except subprocess.CalledProcessError as exc:
-        raise ValueError(
-            f"TradingView watchlist refresh failed with exit code {exc.returncode}"
-        ) from exc
-
-
-def load_tradingview_watchlist_symbols(config: ScanConfig) -> tuple[str, ...]:
-    if not config.tradingview_watchlist_enabled:
-        return ()
-
-    maybe_refresh_tradingview_watchlist(config)
-
-    path = config.tradingview_watchlist_path
-    if not path.exists():
-        raise ValueError(
-            f"TradingView watchlist file not found at {path}. "
-            "Bootstrap the saved session first with `npm run tv:login`, then run `npm run tv:watchlist`."
-        )
-
-    try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"TradingView watchlist file is invalid JSON: {path}") from exc
-
-    symbols = payload.get("symbols")
-    if not isinstance(symbols, list):
-        raise ValueError(f"TradingView watchlist payload is missing a symbols list: {path}")
-
-    normalized = [
-        symbol.strip().upper()
-        for symbol in symbols
-        if isinstance(symbol, str) and symbol.strip()
-    ]
-    return tuple(dict.fromkeys(normalized))
-
-
-def build_prefilter_candidates(
-    client: PolygonClient,
-    config: ScanConfig,
-    now: datetime,
-) -> list[dict[str, Any]]:
-    try:
-        return build_snapshot_prefilter_candidates(client, config, now)
-    except ValueError as exc:
-        if "HTTP 403" not in str(exc):
-            raise
-        if _is_premarket(now) or _is_postmarket(now):
-            raise ValueError(
-                "Full-market pre/post-market prefilter requires Polygon snapshot access. "
-                "Your key cannot access that endpoint, so grouped daily fallback would be stale."
-            ) from exc
-        return build_grouped_prefilter_candidates(client, config, now)
-
-
-def build_snapshot_prefilter_candidates(
-    client: PolygonClient,
-    config: ScanConfig,
-    now: datetime,
-) -> list[dict[str, Any]]:
-    snapshots = client.get_full_market_snapshot(include_otc=False)
-    candidates: list[dict[str, Any]] = []
-
-    for snapshot in snapshots:
-        symbol = snapshot.get("ticker")
-        prev_day = snapshot.get("prevDay") or {}
-        day = snapshot.get("day") or {}
-        min_bar = snapshot.get("min") or {}
-        last_trade = snapshot.get("lastTrade") or {}
-        prev_close = prev_day.get("c")
-        if not symbol or not prev_close:
-            continue
-
-        last_price = last_trade.get("p") or min_bar.get("c") or day.get("c")
-        if not last_price or last_price < config.prefilter_min_price:
-            continue
-
-        volume = day.get("v") or min_bar.get("v") or 0
-        if volume < config.prefilter_min_volume:
-            continue
-
-        if _is_premarket(now) or _is_postmarket(now):
-            drawdown_pct = pct_change(last_price, prev_close)
-        else:
-            day_low = day.get("l")
-            if not day_low:
-                continue
-            drawdown_pct = pct_change(day_low, prev_close)
-
-        if drawdown_pct > -config.prefilter_drawdown_pct:
-            continue
-
-        candidates.append(
-            {
-                "symbol": symbol,
-                "drawdown_pct": drawdown_pct,
-                "volume": volume,
-                "last_price": last_price,
-                "previous_close": prev_close,
-                "source": "snapshot",
-            }
-        )
-
-    candidates.sort(key=lambda item: (item["drawdown_pct"], -item["volume"]))
-    return candidates[: config.prefilter_max_symbols]
-
-
-def build_grouped_prefilter_candidates(
-    client: PolygonClient,
-    config: ScanConfig,
-    now: datetime,
-) -> list[dict[str, Any]]:
-    grouped_date, grouped_bars = latest_grouped_date_on_or_before(client, now)
-    previous_date = previous_trading_date(client, grouped_date)
-    previous_bars = client.get_grouped_daily_bars(previous_date)
-    previous_by_symbol = {bar.get("T"): bar for bar in previous_bars if bar.get("T")}
-    candidates: list[dict[str, Any]] = []
-
-    for bar in grouped_bars:
-        symbol = bar.get("T")
-        previous_bar = previous_by_symbol.get(symbol)
-        if not symbol or not previous_bar:
-            continue
-
-        previous_close = previous_bar.get("c")
-        last_price = bar.get("c")
-        day_low = bar.get("l")
-        volume = bar.get("v") or 0
-        if not previous_close or not last_price or not day_low:
-            continue
-        if last_price < config.prefilter_min_price or volume < config.prefilter_min_volume:
-            continue
-
-        drawdown_pct = pct_change(day_low, previous_close)
-        if drawdown_pct > -config.prefilter_drawdown_pct:
-            continue
-
-        candidates.append(
-            {
-                "symbol": symbol,
-                "drawdown_pct": drawdown_pct,
-                "volume": volume,
-                "last_price": last_price,
-                "previous_close": previous_close,
-                "source": f"grouped:{grouped_date.date().isoformat()}",
-            }
-        )
-
-    candidates.sort(key=lambda item: (item["drawdown_pct"], -item["volume"]))
-    return candidates[: config.prefilter_max_symbols]
-
-
-def resolve_reversal_scan_list(client: PolygonClient, config: ScanConfig, now: datetime) -> tuple[str, ...]:
-    manual_symbols = list(config.reversal_scan_list)
-    tradingview_symbols = list(load_tradingview_watchlist_symbols(config))
-    if not config.prefilter_enabled:
-        merged = tuple(dict.fromkeys([*manual_symbols, *tradingview_symbols]))
-        if not merged:
-            raise ValueError(
-                "REVERSAL_SCAN_LIST and TradingView watchlist are empty while REVERSAL_PREFILTER_ENABLED is false"
-            )
-        return merged
-
-    prefilter_symbols = build_prefilter_symbol_list(client, config, now)
-    merged = tuple(dict.fromkeys([*manual_symbols, *tradingview_symbols, *prefilter_symbols]))
-    if not merged:
-        raise ValueError(
-            "No reversal scan candidates found from REVERSAL_SCAN_LIST, TradingView watchlist, or the prefilter"
-        )
-    return merged
 
 
 def load_alert_state(path: Path) -> dict[str, str]:
@@ -601,9 +491,13 @@ def send_alert(
         )
 
 
-def scan_once(client: PolygonClient, config: ScanConfig, now: datetime) -> list[ScanResult]:
+def scan_once(
+    client: PolygonClient,
+    config: ScanConfig,
+    now: datetime,
+    symbols: tuple[str, ...],
+) -> list[ScanResult]:
     matches: list[ScanResult] = []
-    symbols = resolve_reversal_scan_list(client, config, now)
     for symbol in symbols:
         try:
             previous_bar = client.get_previous_daily_bar(symbol, now)
@@ -613,7 +507,6 @@ def scan_once(client: PolygonClient, config: ScanConfig, now: datetime) -> list[
                 previous_close=previous_bar["c"],
                 previous_high=previous_bar["h"],
                 bars=minute_bars,
-                now=now,
                 config=config,
             )
             if result:
@@ -625,34 +518,40 @@ def scan_once(client: PolygonClient, config: ScanConfig, now: datetime) -> list[
 
 def run() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--build-list",
+        choices=["postmarket", "premarket"],
+        help=(
+            "Build the scan list from a TradingView screener and exit. "
+            "Use 'postmarket' at ~5PM after market close, "
+            "'premarket' at ~5:30AM before market open."
+        ),
+    )
     parser.add_argument("--backtest-symbol")
     parser.add_argument("--backtest-date")
-    parser.add_argument("--show-prefilter", action="store_true")
     args = parser.parse_args()
 
     config = load_config()
     client = PolygonClient(config.polygon_api_key)
 
-    if args.show_prefilter:
-        now = datetime.now(tz=EASTERN)
-        candidates = build_prefilter_candidates(client, config, now)
-        if not candidates:
-            print("No prefilter candidates found.")
-            return 0
-        for item in candidates:
-            print(
-                f"{item['symbol']}: drawdown={item['drawdown_pct']:.2f}% "
-                f"last={item['last_price']:.2f} prev_close={item['previous_close']:.2f} "
-                f"volume={int(item['volume'])} source={item['source']}"
-            )
+    # ------------------------------------------------------------------
+    # List-building modes (run via cron, then exit)
+    # ------------------------------------------------------------------
+    if args.build_list:
+        build_list_phase(args.build_list, config)
         return 0
 
+    # ------------------------------------------------------------------
+    # Backtest mode
+    # ------------------------------------------------------------------
     if args.backtest_symbol and args.backtest_date:
         now = datetime.strptime(args.backtest_date, "%Y-%m-%d").replace(tzinfo=EASTERN)
+        symbols = (args.backtest_symbol.upper(),)
         matches = scan_once(
             client,
-            ScanConfig(**{**config.__dict__, "reversal_scan_list": (args.backtest_symbol.upper(),), "prefilter_enabled": False}),
+            ScanConfig(**{**config.__dict__, "reversal_scan_list": symbols}),
             now,
+            symbols,
         )
         if not matches:
             print(f"No trigger for {args.backtest_symbol.upper()} on {args.backtest_date}")
@@ -666,21 +565,43 @@ def run() -> int:
             )
         return 0
 
+    # ------------------------------------------------------------------
+    # Live scan loop — only fires during regular market hours (9:30–4PM ET)
+    # ------------------------------------------------------------------
+    symbols = resolve_reversal_scan_list(config)
+    data = load_scan_list(config.scan_list_path)
+    postmarket_built = data.get("postmarket", {}).get("built_at", "n/a")
+    premarket_built = data.get("premarket", {}).get("built_at", "n/a")
+    print(
+        f"Scan list loaded: {len(symbols)} symbols "
+        f"(postmarket built: {postmarket_built}, premarket built: {premarket_built})",
+        flush=True,
+    )
+    print(f"Symbols: {', '.join(symbols)}", flush=True)
+
     state = load_alert_state(config.alert_state_path)
 
     while True:
         now = datetime.now(tz=EASTERN)
-        matches = scan_once(client, config, now)
-        for result in matches:
-            if should_alert(result, state, now):
-                send_alert(
-                    format_alert(result, now),
-                    config.alert_webhook_url,
-                    config.telegram_bot_token,
-                    config.telegram_chat_id,
-                )
-                mark_alert_sent(result, state, now)
-                save_alert_state(config.alert_state_path, state)
+
+        if _is_market_hours(now):
+            matches = scan_once(client, config, now, symbols)
+            for result in matches:
+                if should_alert(result, state, now):
+                    send_alert(
+                        format_alert(result, now),
+                        config.alert_webhook_url,
+                        config.telegram_bot_token,
+                        config.telegram_chat_id,
+                    )
+                    mark_alert_sent(result, state, now)
+                    save_alert_state(config.alert_state_path, state)
+        else:
+            print(
+                f"Outside market hours ({now.strftime('%H:%M:%S %Z')}), waiting...",
+                flush=True,
+            )
+
         time.sleep(config.poll_seconds)
 
 

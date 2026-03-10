@@ -62,7 +62,7 @@ async function pathExists(target) {
 
 async function prepareUserDataDir() {
   const useAppProfile =
-    (process.env.TRADINGVIEW_USE_APP_PROFILE || "").trim().toLowerCase() in
+    (process.env.TRADINGVIEW_USE_APP_PROFILE || "true").trim().toLowerCase() in
     { "1": true, true: true, yes: true, on: true };
   const appProfileDir =
     process.env.TRADINGVIEW_APP_PROFILE_DIR ||
