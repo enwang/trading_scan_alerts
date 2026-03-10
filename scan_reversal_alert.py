@@ -282,6 +282,20 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     print(f"[{phase}] Refreshing TradingView screens...", flush=True)
     refresh_tv_screens(config)
 
+    # Guard against stale data: if the screens file wasn't just refreshed (no refresh
+    # command set) and is older than 2 hours, refuse to proceed rather than silently
+    # building the scan list from yesterday's screener snapshot.
+    screens_path = config.tradingview_screens_path
+    if not config.tradingview_screens_refresh_command and screens_path.exists():
+        age_seconds = time.time() - screens_path.stat().st_mtime
+        if age_seconds > 7200:
+            age_hours = age_seconds / 3600
+            raise ValueError(
+                f"TradingView screens file is {age_hours:.1f}h old ({screens_path}). "
+                "Set TRADINGVIEW_SCREENS_REFRESH_COMMAND=npm run tv:screens in .env "
+                "to auto-refresh, or run `npm run tv:screens` manually first."
+            )
+
     screener_name = (
         config.postmarket_screener_name
         if phase == "postmarket"
