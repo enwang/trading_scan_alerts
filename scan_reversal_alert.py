@@ -21,11 +21,19 @@ from zoneinfo import ZoneInfo
 EASTERN = ZoneInfo("America/New_York")
 ENV_PATH = Path(".env")
 
+# Scan interval tiers (seconds). Assigned dynamically based on how close a symbol
+# is to triggering, so rare API calls are spent on the most promising symbols.
+_INTERVAL_LOW    = 300  # 5 min  — drawdown threshold not yet met
+_INTERVAL_MEDIUM = 180  # 3 min  — drawdown met, rebound < 30% of required
+_INTERVAL_HIGH   = 120  # 2 min  — rebound 30–70% of required
+_INTERVAL_URGENT =  60  # 1 min  — rebound > 70% of required (near trigger)
+
 
 @dataclass(frozen=True)
 class ScanConfig:
     polygon_api_key: str
     reversal_scan_list: tuple[str, ...]
+    polygon_rate_limit: int = 5
     tradingview_screens_path: Path = Path("tv-output/all-screens.json")
     tradingview_screens_refresh_command: str | None = None
     postmarket_screener_name: str = "Post market gap down"
@@ -40,6 +48,14 @@ class ScanConfig:
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     alert_state_path: Path = Path("alert_state.json")
+
+
+@dataclass
+class SymbolState:
+    previous_close: float
+    previous_high: float
+    next_scan_at: float = 0.0   # time.time() value when next scan is due
+    interval: int = _INTERVAL_LOW
 
 
 @dataclass(frozen=True)
@@ -61,10 +77,34 @@ class ScanResult:
     near_previous_high: bool
 
 
+class RateLimiter:
+    """Sliding-window rate limiter: max N calls per 60-second window."""
+
+    def __init__(self, max_calls_per_minute: int) -> None:
+        self._max = max_calls_per_minute
+        self._timestamps: list[float] = []
+
+    def _purge(self) -> None:
+        cutoff = time.time() - 60.0
+        self._timestamps = [t for t in self._timestamps if t > cutoff]
+
+    def available(self) -> int:
+        self._purge()
+        return max(0, self._max - len(self._timestamps))
+
+    def consume(self) -> None:
+        self._timestamps.append(time.time())
+
+    def seconds_until_available(self) -> float:
+        self._purge()
+        if len(self._timestamps) < self._max:
+            return 0.0
+        return max(0.0, 60.0 - (time.time() - min(self._timestamps))) + 0.1
+
+
 class PolygonClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
-        self._grouped_daily_cache: dict[str, list[dict[str, Any]]] = {}
 
     def get_previous_daily_bar(self, symbol: str, today: datetime) -> dict[str, Any]:
         start = (today - timedelta(days=10)).date().isoformat()
@@ -74,26 +114,13 @@ class PolygonClient:
         results = data.get("results", [])
         if not results:
             raise ValueError(f"No previous daily bar found for {symbol}")
-        latest = sorted(results, key=lambda row: row["t"], reverse=True)[0]
-        return latest
+        return sorted(results, key=lambda row: row["t"], reverse=True)[0]
 
     def get_todays_minute_bars(self, symbol: str, today: datetime) -> list[dict[str, Any]]:
         day = today.date().isoformat()
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{day}/{day}"
         data = self._get(url, {"adjusted": "true", "sort": "asc", "limit": 50000})
         return data.get("results", [])
-
-    def get_grouped_daily_bars(self, day: datetime) -> list[dict[str, Any]]:
-        day_str = day.date().isoformat()
-        if day_str in self._grouped_daily_cache:
-            return self._grouped_daily_cache[day_str]
-        data = self._get(
-            f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{day_str}",
-            {"adjusted": "true", "include_otc": "false"},
-        )
-        results = data.get("results", [])
-        self._grouped_daily_cache[day_str] = results
-        return results
 
     def _get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         payload = http_json_get(url, {**params, "apiKey": self.api_key})
@@ -153,6 +180,7 @@ def load_config() -> ScanConfig:
     return ScanConfig(
         polygon_api_key=api_key,
         reversal_scan_list=reversal_scan_list,
+        polygon_rate_limit=int(os.getenv("POLYGON_RATE_LIMIT", "5")),
         tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
         tradingview_screens_refresh_command=os.getenv("TRADINGVIEW_SCREENS_REFRESH_COMMAND", "").strip() or None,
         postmarket_screener_name=os.getenv("POSTMARKET_SCREENER_NAME", "Post market gap down"),
@@ -348,6 +376,35 @@ def resolve_reversal_scan_list(config: ScanConfig) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def compute_scan_interval(
+    bars: list[dict[str, Any]],
+    previous_close: float,
+    config: ScanConfig,
+) -> int:
+    """Return the next scan interval in seconds based on how close the symbol is to triggering."""
+    premarket_bars = [b for b in bars if _is_premarket_bar(b["t"])]
+    if not premarket_bars:
+        return _INTERVAL_LOW
+
+    premarket_low = min(b["l"] for b in premarket_bars)
+    if pct_change(premarket_low, previous_close) > -config.premarket_drawdown_pct:
+        return _INTERVAL_LOW  # hasn't gapped down enough yet
+
+    regular_bars = [b for b in bars if _is_regular_bar(b["t"])]
+    if not regular_bars:
+        return _INTERVAL_MEDIUM  # drawdown met, waiting for market open
+
+    last_price = regular_bars[-1]["c"]
+    rebound_pct = pct_change(last_price, premarket_low)
+    progress = rebound_pct / config.regular_session_rebound_pct  # 0.0 → 1.0+
+
+    if progress >= 0.7:
+        return _INTERVAL_URGENT
+    if progress >= 0.3:
+        return _INTERVAL_HIGH
+    return _INTERVAL_MEDIUM
+
+
 def evaluate_reversal_scan(
     symbol: str,
     previous_close: float,
@@ -505,12 +562,13 @@ def send_alert(
         )
 
 
-def scan_once(
+def scan_once_backtest(
     client: PolygonClient,
     config: ScanConfig,
     now: datetime,
     symbols: tuple[str, ...],
 ) -> list[ScanResult]:
+    """Used only for backtesting — no rate limiting needed."""
     matches: list[ScanResult] = []
     for symbol in symbols:
         try:
@@ -528,6 +586,35 @@ def scan_once(
         except Exception as exc:  # noqa: BLE001
             print(f"{symbol}: scan failed: {exc}", file=sys.stderr, flush=True)
     return matches
+
+
+def prefetch_previous_bars(
+    client: PolygonClient,
+    symbols: tuple[str, ...],
+    now: datetime,
+    limiter: RateLimiter,
+) -> dict[str, SymbolState]:
+    """Fetch previous daily bars for all symbols at startup, respecting rate limit.
+    Returns a per-symbol state dict. Symbols that fail are skipped with a warning.
+    """
+    states: dict[str, SymbolState] = {}
+    print(f"Pre-fetching previous daily bars for {len(symbols)} symbol(s)...", flush=True)
+    for symbol in symbols:
+        wait = limiter.seconds_until_available()
+        if wait > 0:
+            print(f"  Rate limit reached, waiting {wait:.1f}s...", flush=True)
+            time.sleep(wait)
+        try:
+            bar = client.get_previous_daily_bar(symbol, now)
+            limiter.consume()
+            states[symbol] = SymbolState(
+                previous_close=bar["c"],
+                previous_high=bar["h"],
+            )
+            print(f"  {symbol}: prev_close={bar['c']:.2f}  prev_high={bar['h']:.2f}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {symbol}: skipped (prev bar fetch failed: {exc})", file=sys.stderr, flush=True)
+    return states
 
 
 def run() -> int:
@@ -561,7 +648,7 @@ def run() -> int:
     if args.backtest_symbol and args.backtest_date:
         now = datetime.strptime(args.backtest_date, "%Y-%m-%d").replace(tzinfo=EASTERN)
         symbols = (args.backtest_symbol.upper(),)
-        matches = scan_once(
+        matches = scan_once_backtest(
             client,
             ScanConfig(**{**config.__dict__, "reversal_scan_list": symbols}),
             now,
@@ -580,43 +667,110 @@ def run() -> int:
         return 0
 
     # ------------------------------------------------------------------
-    # Live scan loop — only fires during regular market hours (9:30–4PM ET)
+    # Live scan loop
     # ------------------------------------------------------------------
     symbols = resolve_reversal_scan_list(config)
     data = load_scan_list(config.scan_list_path)
     postmarket_built = data.get("postmarket", {}).get("built_at", "n/a")
     premarket_built = data.get("premarket", {}).get("built_at", "n/a")
     print(
-        f"Scan list loaded: {len(symbols)} symbols "
+        f"Scan list: {len(symbols)} symbol(s) "
         f"(postmarket built: {postmarket_built}, premarket built: {premarket_built})",
         flush=True,
     )
     print(f"Symbols: {', '.join(symbols)}", flush=True)
+    print(f"Rate limit: {config.polygon_rate_limit} calls/min", flush=True)
 
-    state = load_alert_state(config.alert_state_path)
+    limiter = RateLimiter(config.polygon_rate_limit)
+    alert_state = load_alert_state(config.alert_state_path)
+
+    # Pre-fetch all previous daily bars once (doesn't change during the day).
+    # This avoids spending a call per symbol per scan cycle on static data.
+    now = datetime.now(tz=EASTERN)
+    symbol_states = prefetch_previous_bars(client, symbols, now, limiter)
+
+    if not symbol_states:
+        print("No symbols with valid previous daily bars. Exiting.", file=sys.stderr)
+        return 1
+
+    print(
+        f"\nScanning {len(symbol_states)} symbol(s). Intervals: "
+        f"LOW={_INTERVAL_LOW}s  MEDIUM={_INTERVAL_MEDIUM}s  "
+        f"HIGH={_INTERVAL_HIGH}s  URGENT={_INTERVAL_URGENT}s",
+        flush=True,
+    )
 
     while True:
         now = datetime.now(tz=EASTERN)
 
-        if _is_market_hours(now):
-            matches = scan_once(client, config, now, symbols)
-            for result in matches:
-                if should_alert(result, state, now):
-                    send_alert(
-                        format_alert(result, now),
-                        config.alert_webhook_url,
-                        config.telegram_bot_token,
-                        config.telegram_chat_id,
-                    )
-                    mark_alert_sent(result, state, now)
-                    save_alert_state(config.alert_state_path, state)
-        else:
+        if not _is_market_hours(now):
             print(
                 f"Outside market hours ({now.strftime('%H:%M:%S %Z')}), waiting...",
                 flush=True,
             )
+            time.sleep(config.poll_seconds)
+            continue
 
-        time.sleep(config.poll_seconds)
+        current_ts = time.time()
+
+        # Symbols whose cooldown has expired, sorted most-urgent first.
+        due = sorted(
+            [sym for sym, st in symbol_states.items() if current_ts >= st.next_scan_at],
+            key=lambda s: symbol_states[s].interval,
+        )
+
+        available = limiter.available()
+        to_scan = due[:available]
+
+        if to_scan:
+            interval_labels = {
+                _INTERVAL_LOW: "LOW", _INTERVAL_MEDIUM: "MED",
+                _INTERVAL_HIGH: "HIGH", _INTERVAL_URGENT: "URGENT",
+            }
+            summary = ", ".join(
+                f"{s}({interval_labels.get(symbol_states[s].interval, symbol_states[s].interval)})"
+                for s in to_scan
+            )
+            print(
+                f"{now.strftime('%H:%M:%S')} scanning [{summary}] "
+                f"({available} calls avail, {len(due) - len(to_scan)} deferred)",
+                flush=True,
+            )
+
+            for symbol in to_scan:
+                state = symbol_states[symbol]
+                try:
+                    minute_bars = client.get_todays_minute_bars(symbol, now)
+                    limiter.consume()
+
+                    new_interval = compute_scan_interval(minute_bars, state.previous_close, config)
+                    state.interval = new_interval
+                    state.next_scan_at = time.time() + new_interval
+
+                    result = evaluate_reversal_scan(
+                        symbol=symbol,
+                        previous_close=state.previous_close,
+                        previous_high=state.previous_high,
+                        bars=minute_bars,
+                        config=config,
+                    )
+                    if result and should_alert(result, alert_state, now):
+                        send_alert(
+                            format_alert(result, now),
+                            config.alert_webhook_url,
+                            config.telegram_bot_token,
+                            config.telegram_chat_id,
+                        )
+                        mark_alert_sent(result, alert_state, now)
+                        save_alert_state(config.alert_state_path, alert_state)
+
+                except Exception as exc:  # noqa: BLE001
+                    print(f"{symbol}: scan failed: {exc}", file=sys.stderr, flush=True)
+                    state.next_scan_at = time.time() + 60  # retry in 1 min
+
+        # Sleep: if rate limited wait for window to clear, otherwise check again in 1s.
+        wait = limiter.seconds_until_available()
+        time.sleep(wait if wait > 0 and due else 1.0)
 
 
 if __name__ == "__main__":
