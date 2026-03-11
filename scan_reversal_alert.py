@@ -17,14 +17,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+import yfinance as yf
+
 
 EASTERN = ZoneInfo("America/New_York")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ENV_PATH = Path(".env")
 
 # Scan interval tiers (seconds). Assigned dynamically based on how close a symbol
-# is to triggering, so rare API calls are spent on the most promising symbols.
-_INTERVAL_LOW    = 300  # 5 min  — drawdown threshold not yet met
+# is to triggering, so API calls are spent on the most promising symbols.
+_INTERVAL_LOW    = 300  # 5 min  — drawdown threshold not yet met / gap recovered
 _INTERVAL_MEDIUM = 180  # 3 min  — drawdown met, rebound < 30% of required
 _INTERVAL_HIGH   = 120  # 2 min  — rebound 30–70% of required
 _INTERVAL_URGENT =  60  # 1 min  — rebound > 70% of required (near trigger)
@@ -32,9 +34,8 @@ _INTERVAL_URGENT =  60  # 1 min  — rebound > 70% of required (near trigger)
 
 @dataclass(frozen=True)
 class ScanConfig:
-    polygon_api_key: str
     reversal_scan_list: tuple[str, ...]
-    polygon_rate_limit: int = 5
+    api_rate_limit: int = 30
     tradingview_screens_path: Path = Path("tv-output/all-screens.json")
     tradingview_screens_refresh_command: str | None = None
     postmarket_screener_name: str = "Post market gap down"
@@ -103,43 +104,49 @@ class RateLimiter:
         return max(0.0, 60.0 - (time.time() - min(self._timestamps))) + 0.1
 
 
-class PolygonClient:
-    def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+class YFinanceClient:
+    """Yahoo Finance data client — no API key required, free intraday access."""
 
     def get_previous_daily_bar(self, symbol: str, today: datetime) -> dict[str, Any]:
-        start = (today - timedelta(days=10)).date().isoformat()
-        end = (today - timedelta(days=1)).date().isoformat()
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
-        data = self._get(url, {"adjusted": "true", "sort": "desc", "limit": 10})
-        results = data.get("results", [])
-        if not results:
+        hist = yf.Ticker(symbol).history(period="10d", interval="1d")
+        if hist.empty:
+            raise ValueError(f"No daily bar data for {symbol}")
+        today_date = today.astimezone(EASTERN).date()
+        prev = hist[hist.index.date < today_date]
+        if prev.empty:
             raise ValueError(f"No previous daily bar found for {symbol}")
-        return sorted(results, key=lambda row: row["t"], reverse=True)[0]
+        row = prev.iloc[-1]
+        return {
+            "t": int(row.name.timestamp() * 1000),
+            "o": float(row["Open"]),
+            "h": float(row["High"]),
+            "l": float(row["Low"]),
+            "c": float(row["Close"]),
+            "v": float(row["Volume"]),
+        }
 
     def get_todays_minute_bars(self, symbol: str, today: datetime) -> list[dict[str, Any]]:
-        day = today.date().isoformat()
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{day}/{day}"
-        data = self._get(url, {"adjusted": "true", "sort": "asc", "limit": 50000})
-        return data.get("results", [])
-
-    def _get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
-        payload = http_json_get(url, {**params, "apiKey": self.api_key})
-        if payload.get("status") == "ERROR":
-            raise ValueError(payload.get("error", "Polygon request failed"))
-        return payload
-
-
-def http_json_get(url: str, params: dict[str, Any]) -> dict[str, Any]:
-    full_url = f"{url}?{urlencode(params)}"
-    request = Request(full_url, headers={"User-Agent": "trading-scan/1.0"})
-    try:
-        with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise ValueError(f"HTTP {exc.code} for {url}") from exc
-    except URLError as exc:
-        raise ValueError(f"Network error for {url}: {exc.reason}") from exc
+        today_date = today.astimezone(EASTERN).date()
+        tomorrow_date = today_date + timedelta(days=1)
+        hist = yf.Ticker(symbol).history(
+            start=today_date.isoformat(),
+            end=tomorrow_date.isoformat(),
+            interval="1m",
+            prepost=True,
+        )
+        if hist.empty:
+            return []
+        bars = []
+        for ts, row in hist.iterrows():
+            bars.append({
+                "t": int(ts.timestamp() * 1000),
+                "o": float(row["Open"]),
+                "h": float(row["High"]),
+                "l": float(row["Low"]),
+                "c": float(row["Close"]),
+                "v": float(row["Volume"]),
+            })
+        return bars
 
 
 def http_json_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -167,10 +174,6 @@ def http_json_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> ScanConfig:
     load_dotenv(ENV_PATH)
 
-    api_key = os.getenv("POLYGON_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("POLYGON_API_KEY is required")
-
     reversal_list_raw = os.getenv("REVERSAL_SCAN_LIST", "").strip()
     reversal_scan_list = tuple(
         symbol.strip().upper()
@@ -179,9 +182,8 @@ def load_config() -> ScanConfig:
     )
 
     return ScanConfig(
-        polygon_api_key=api_key,
         reversal_scan_list=reversal_scan_list,
-        polygon_rate_limit=int(os.getenv("POLYGON_RATE_LIMIT", "5")),
+        api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
         tradingview_screens_refresh_command=os.getenv("TRADINGVIEW_SCREENS_REFRESH_COMMAND", "").strip() or None,
         postmarket_screener_name=os.getenv("POSTMARKET_SCREENER_NAME", "Post market gap down"),
@@ -311,9 +313,6 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     print(f"[{phase}] Refreshing TradingView screens...", flush=True)
     refresh_tv_screens(config)
 
-    # Guard against stale data: if the screens file wasn't just refreshed (no refresh
-    # command set) and is older than 2 hours, refuse to proceed rather than silently
-    # building the scan list from yesterday's screener snapshot.
     screens_path = config.tradingview_screens_path
     if not config.tradingview_screens_refresh_command and screens_path.exists():
         age_seconds = time.time() - screens_path.stat().st_mtime
@@ -337,7 +336,6 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     now_str = datetime.now(tz=EASTERN).isoformat()
 
     if phase == "postmarket":
-        # Start fresh for the new trading day; clear any stale pre-market data.
         data: dict[str, Any] = {
             "postmarket": {"symbols": list(symbols), "built_at": now_str},
             "premarket": {},
@@ -359,7 +357,6 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
 
 
 def resolve_reversal_scan_list(config: ScanConfig) -> tuple[str, ...]:
-    """Return the symbols to scan: scan-list file + any manual overrides from env."""
     scan_list_symbols = list(get_scan_list_symbols(config.scan_list_path))
     manual_symbols = list(config.reversal_scan_list)
     merged = tuple(dict.fromkeys([*scan_list_symbols, *manual_symbols]))
@@ -382,14 +379,14 @@ def compute_scan_interval(
     previous_close: float,
     config: ScanConfig,
 ) -> int:
-    """Return the next scan interval in seconds based on how close the symbol is to triggering."""
+    """Return next scan interval in seconds based on how close the symbol is to triggering."""
     premarket_bars = [b for b in bars if _is_premarket_bar(b["t"])]
     if not premarket_bars:
         return _INTERVAL_LOW
 
     premarket_low = min(b["l"] for b in premarket_bars)
     if pct_change(premarket_low, previous_close) > -config.premarket_drawdown_pct:
-        return _INTERVAL_LOW  # hasn't gapped down enough yet
+        return _INTERVAL_LOW  # gap recovered
 
     regular_bars = [b for b in bars if _is_regular_bar(b["t"])]
     if not regular_bars:
@@ -397,7 +394,7 @@ def compute_scan_interval(
 
     last_price = regular_bars[-1]["c"]
     rebound_pct = pct_change(last_price, premarket_low)
-    progress = rebound_pct / config.regular_session_rebound_pct  # 0.0 → 1.0+
+    progress = rebound_pct / config.regular_session_rebound_pct
 
     if progress >= 0.7:
         return _INTERVAL_URGENT
@@ -423,7 +420,6 @@ def evaluate_reversal_scan(
 
     premarket_low = min(bar["l"] for bar in premarket_bars)
     regular_open = regular_bars[0]["o"]
-
     premarket_drawdown_pct = pct_change(premarket_low, previous_close)
 
     if premarket_drawdown_pct > -config.premarket_drawdown_pct:
@@ -564,7 +560,7 @@ def send_alert(
 
 
 def scan_once_backtest(
-    client: PolygonClient,
+    client: YFinanceClient,
     config: ScanConfig,
     now: datetime,
     symbols: tuple[str, ...],
@@ -590,14 +586,12 @@ def scan_once_backtest(
 
 
 def prefetch_previous_bars(
-    client: PolygonClient,
+    client: YFinanceClient,
     symbols: tuple[str, ...],
     now: datetime,
     limiter: RateLimiter,
 ) -> dict[str, SymbolState]:
-    """Fetch previous daily bars for all symbols at startup, respecting rate limit.
-    Returns a per-symbol state dict. Symbols that fail are skipped with a warning.
-    """
+    """Fetch previous daily bars for all symbols at startup, respecting rate limit."""
     states: dict[str, SymbolState] = {}
     print(f"Pre-fetching previous daily bars for {len(symbols)} symbol(s)...", flush=True)
     for symbol in symbols:
@@ -634,7 +628,7 @@ def run() -> int:
     args = parser.parse_args()
 
     config = load_config()
-    client = PolygonClient(config.polygon_api_key)
+    client = YFinanceClient()
 
     # ------------------------------------------------------------------
     # List-building modes (run via cron, then exit)
@@ -668,7 +662,7 @@ def run() -> int:
         return 0
 
     # ------------------------------------------------------------------
-    # Live scan loop
+    # Live scan loop — only fires during regular market hours (9:30–4PM ET)
     # ------------------------------------------------------------------
     symbols = resolve_reversal_scan_list(config)
     data = load_scan_list(config.scan_list_path)
@@ -680,13 +674,11 @@ def run() -> int:
         flush=True,
     )
     print(f"Symbols: {', '.join(symbols)}", flush=True)
-    print(f"Rate limit: {config.polygon_rate_limit} calls/min", flush=True)
+    print(f"Rate limit: {config.api_rate_limit} calls/min", flush=True)
 
-    limiter = RateLimiter(config.polygon_rate_limit)
+    limiter = RateLimiter(config.api_rate_limit)
     alert_state = load_alert_state(config.alert_state_path)
 
-    # Pre-fetch all previous daily bars once (doesn't change during the day).
-    # This avoids spending a call per symbol per scan cycle on static data.
     now = datetime.now(tz=EASTERN)
     symbol_states = prefetch_previous_bars(client, symbols, now, limiter)
 
@@ -714,12 +706,8 @@ def run() -> int:
 
         current_ts = time.time()
 
-        # Symbols whose cooldown has expired, sorted most-urgent first.
         due = sorted(
             [sym for sym, st in symbol_states.items() if current_ts >= st.next_scan_at],
-            # Primary: most urgent tier first (smallest interval).
-            # Tiebreak: longest waiting first (smallest next_scan_at) so no symbol
-            # starves when many tickers share the same tier and budget is limited.
             key=lambda s: (symbol_states[s].interval, symbol_states[s].next_scan_at),
         )
 
@@ -770,9 +758,8 @@ def run() -> int:
 
                 except Exception as exc:  # noqa: BLE001
                     print(f"{symbol}: scan failed: {exc}", file=sys.stderr, flush=True)
-                    state.next_scan_at = time.time() + 60  # retry in 1 min
+                    state.next_scan_at = time.time() + 60
 
-        # Sleep: if rate limited wait for window to clear, otherwise check again in 1s.
         wait = limiter.seconds_until_available()
         time.sleep(wait if wait > 0 and due else 1.0)
 
