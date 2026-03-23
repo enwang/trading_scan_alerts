@@ -186,14 +186,14 @@ The helper script [scripts/refresh_tv_lists.sh](/Users/welsnake/trading_scan/scr
 - supports `nvm` if `NVM_DIR` is set
 - skips weekends and NYSE market holidays via `scripts/is_trading_day.py`
 
-Example cron entry for `1:00 AM` server time:
+Example cron entry for `4:00 AM EST (1:00 AM PST)` server time:
 
 ```cron
-0 1 * * * /path/to/repo/scripts/refresh_tv_lists.sh
+0 4 * * * /path/to/repo/scripts/refresh_tv_lists.sh
 ```
 
 Example with explicit repo and tool paths:
 
 ```cron
-0 1 * * * SCAN_DIR=/home/ubuntu/trading_scan NVM_DIR=/home/ubuntu/.nvm /home/ubuntu/trading_scan/scripts/refresh_tv_lists.sh
+0 4 * * * SCAN_DIR=/home/ubuntu/trading_scan NVM_DIR=/home/ubuntu/.nvm /home/ubuntu/trading_scan/scripts/refresh_tv_lists.sh
 ```
