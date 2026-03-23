@@ -174,3 +174,26 @@ UR_WATCHLIST_NAMES=Focus,Strong,Next
 UR_REBOUND_PCT=2.0
 UR_ALERT_STATE_PATH=undercut_rally_alert_state.json
 ```
+
+## Ubuntu VM refresh job
+
+For a Linux or Ubuntu VM, the TradingView list refresh is not installed automatically. After deploying the repo, install a cron entry on the VM.
+
+The helper script [scripts/refresh_tv_lists.sh](/Users/welsnake/trading_scan/scripts/refresh_tv_lists.sh) is portable and:
+
+- resolves the repo path from the script location
+- finds `python3` and `npm` from `PATH`
+- supports `nvm` if `NVM_DIR` is set
+- skips weekends and NYSE market holidays via `scripts/is_trading_day.py`
+
+Example cron entry for `1:00 AM` server time:
+
+```cron
+0 1 * * * /path/to/repo/scripts/refresh_tv_lists.sh
+```
+
+Example with explicit repo and tool paths:
+
+```cron
+0 1 * * * SCAN_DIR=/home/ubuntu/trading_scan NVM_DIR=/home/ubuntu/.nvm /home/ubuntu/trading_scan/scripts/refresh_tv_lists.sh
+```
