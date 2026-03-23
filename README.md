@@ -51,6 +51,12 @@ If neither Telegram nor webhook is set, the script prints alerts to stdout only.
 python3 scan_reversal_alert.py
 ```
 
+For the separate undercut-and-rally scanner:
+
+```bash
+python3 scan_undercut_rally_alert.py
+```
+
 To inspect the current market-wide prefilter candidates without sending alerts:
 
 ```bash
@@ -65,6 +71,7 @@ This workspace also includes a browser automation helper for TradingView:
 npm run tv:login
 npm run tv:watchlist
 npm run tv:screener
+npm run tv:lists
 ```
 
 For desktop-app debugging on macOS, there is also a small UI automation helper:
@@ -93,6 +100,7 @@ How it works:
 - you log in to TradingView once in that browser window
 - later runs reuse that saved TradingView session headlessly
 - outputs are saved into `tv-output/watchlist.json` and `tv-output/screener.json`
+- `npm run tv:lists` saves all watchlists plus the current screener into `tv-output/all-lists.json`
 
 Important:
 
@@ -140,3 +148,26 @@ During premarket and postmarket, the prefilter uses current extended-hours price
 Important: full-market premarket and postmarket scanning requires Polygon snapshot access. If your Polygon key cannot access the market-wide snapshot endpoint, the scanner will not fall back to grouped daily data outside regular hours because that would be stale.
 
 The scanner sends one alert per symbol per day and stores dedupe state in `alert_state.json`.
+
+## U&R rule
+
+`scan_undercut_rally_alert.py` is a separate scanner for `undercut and Rally` / `U&R`.
+
+Default behavior:
+
+- reads TradingView watchlists from `tv-output/all-lists.json`
+- scans only watchlists named `Focus`, `Strong`, and `Next`
+- looks for symbols that trade below the previous trading day's low
+- then alerts once the minute high is at least `2%` above the lowest price reached after that undercut
+- can alert again the same day only if the symbol sets a fresh lower intraday low and then rallies again
+- alert timestamps are printed in `PT` by default
+- stores alert state in `undercut_rally_alert_state.json`
+
+Optional overrides:
+
+```dotenv
+TRADINGVIEW_WATCHLISTS_REFRESH_COMMAND=npm run tv:lists
+UR_WATCHLIST_NAMES=Focus,Strong,Next
+UR_REBOUND_PCT=2.0
+UR_ALERT_STATE_PATH=undercut_rally_alert_state.json
+```
