@@ -1,12 +1,36 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 
 set -euo pipefail
 
-PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-SCAN_DIR="/Users/welsnake/trading_scan"
-LOG_FILE="$SCAN_DIR/tv-refresh.log"
-PYTHON_BIN="/opt/homebrew/bin/python3"
-NPM_BIN="/opt/homebrew/bin/npm"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN_DIR="${SCAN_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+LOG_FILE="${LOG_FILE:-$SCAN_DIR/tv-refresh.log}"
+
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+if [[ -n "${NVM_DIR:-}" && -s "${NVM_DIR}/nvm.sh" ]]; then
+  # Support VM setups where npm is installed via nvm and cron has a minimal PATH.
+  # shellcheck source=/dev/null
+  . "${NVM_DIR}/nvm.sh"
+fi
+
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+
+if [[ -z "${NPM_BIN:-}" ]]; then
+  NPM_BIN="$(command -v npm || true)"
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S %Z') ERROR: python3 not found in PATH" >> "$LOG_FILE"
+  exit 1
+fi
+
+if [[ -z "$NPM_BIN" ]]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S %Z') ERROR: npm not found in PATH" >> "$LOG_FILE"
+  exit 1
+fi
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S %Z'
