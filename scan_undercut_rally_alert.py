@@ -37,6 +37,8 @@ class ScanConfig:
     tradingview_watchlists_path: Path = Path("tv-output/all-lists.json")
     tradingview_watchlists_refresh_command: str | None = None
     watchlist_names: tuple[str, ...] = ("Focus", "Strong", "Next")
+    holding_watchlist_name: str = "Holding"
+    holding_section_names: tuple[str, ...] = ("IDEA", "HOLDING")
     rebound_pct: float = 2.0
     api_rate_limit: int = 30
     poll_seconds: int = 60
@@ -84,6 +86,12 @@ def load_config() -> ScanConfig:
             os.getenv("TRADINGVIEW_WATCHLISTS_REFRESH_COMMAND", "").strip() or None
         ),
         watchlist_names=watchlist_names or ("Focus", "Strong", "Next"),
+        holding_watchlist_name=os.getenv("UR_HOLDING_WATCHLIST_NAME", "Holding").strip() or "Holding",
+        holding_section_names=tuple(
+            section.strip()
+            for section in os.getenv("UR_HOLDING_SECTION_NAMES", "IDEA,HOLDING").split(",")
+            if section.strip()
+        ) or ("IDEA", "HOLDING"),
         rebound_pct=float(os.getenv("UR_REBOUND_PCT", "2.0")),
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         poll_seconds=int(os.getenv("POLL_SECONDS", "60")),
@@ -142,9 +150,25 @@ def load_watchlist_symbols(config: ScanConfig) -> tuple[str, ...]:
     requested_names = {name.casefold(): name for name in config.watchlist_names}
     found_names: set[str] = set()
     symbols: list[str] = []
+    holding_symbols: list[str] = []
+    found_holding = False
+    found_sections: set[str] = set()
 
     for watchlist in payload.get("watchlists", []):
         raw_name = str(watchlist.get("name", "")).strip()
+        if raw_name.casefold() == config.holding_watchlist_name.casefold():
+            found_holding = True
+            sections = watchlist.get("sections") or {}
+            requested_sections = {name.casefold(): name for name in config.holding_section_names}
+            for section_name, raw_symbols in sections.items():
+                if str(section_name).strip().casefold() not in requested_sections:
+                    continue
+                found_sections.add(str(section_name).strip().casefold())
+                for raw_symbol in raw_symbols:
+                    symbol = _normalize_symbol(raw_symbol)
+                    if symbol:
+                        holding_symbols.append(symbol)
+
         if raw_name.casefold() not in requested_names:
             continue
         found_names.add(raw_name.casefold())
@@ -161,7 +185,22 @@ def load_watchlist_symbols(config: ScanConfig) -> tuple[str, ...]:
             f"{missing} in {config.tradingview_watchlists_path}. Available: {available}"
         )
 
-    deduped = tuple(dict.fromkeys(symbols))
+    if not found_holding:
+        raise ValueError(
+            f"TradingView watchlists missing holding watchlist '{config.holding_watchlist_name}' "
+            f"in {config.tradingview_watchlists_path}"
+        )
+
+    missing_sections = [
+        name for name in config.holding_section_names if name.casefold() not in found_sections
+    ]
+    if missing_sections:
+        raise ValueError(
+            f"Holding watchlist '{config.holding_watchlist_name}' is missing sections {missing_sections} "
+            f"in {config.tradingview_watchlists_path}"
+        )
+
+    deduped = tuple(dict.fromkeys([*symbols, *holding_symbols]))
     if not deduped:
         raise ValueError(
             f"No symbols found in watchlists {config.watchlist_names} "

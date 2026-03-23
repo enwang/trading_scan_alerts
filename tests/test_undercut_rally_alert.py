@@ -27,6 +27,7 @@ class UndercutRallyScanTests(unittest.TestCase):
             "watchlists": [
                 {"name": "Focus", "symbols": ["NASDAQ:NVDA", "TSLA"]},
                 {"name": "Strong", "symbols": ["PLTR", "NASDAQ:NVDA"]},
+                {"name": "Holding", "symbols": [], "sections": {"IDEA": ["AMD"], "HOLDING": ["MSFT"]}},
                 {"name": "Other", "symbols": ["AAPL"]},
                 {"name": "Next", "symbols": ["AMD"]},
             ]
@@ -39,7 +40,7 @@ class UndercutRallyScanTests(unittest.TestCase):
 
             symbols = load_watchlist_symbols(config)
 
-        self.assertEqual(symbols, ("NVDA", "TSLA", "PLTR", "AMD"))
+        self.assertEqual(symbols, ("NVDA", "TSLA", "PLTR", "AMD", "MSFT"))
 
     def test_ur_triggers_after_undercut_and_two_percent_rally_from_current_low(self) -> None:
         config = ScanConfig(rebound_pct=2.0)
