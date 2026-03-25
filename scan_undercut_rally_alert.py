@@ -346,7 +346,6 @@ def should_alert(result: ScanResult, state: dict[str, Any], now: datetime) -> bo
     if isinstance(raw_value, dict):
         return not (
             float(raw_value.get("undercut_low", "nan")) == result.undercut_low
-            and float(raw_value.get("trigger_price", "nan")) == result.trigger_price
         )
 
     # Older state files stored only the low; treat them as stale state and allow
