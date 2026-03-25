@@ -179,12 +179,6 @@ def http_json_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> ScanConfig:
     load_dotenv(ENV_PATH)
 
-    reversal_scan_list = tuple(
-        symbol.strip().upper()
-        for symbol in reversal_list_raw.split(",")
-        if symbol.strip()
-    )
-
     return ScanConfig(
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
