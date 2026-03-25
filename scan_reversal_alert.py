@@ -34,7 +34,7 @@ _INTERVAL_URGENT =  60  # 1 min  — rebound > 70% of required (near trigger)
 
 @dataclass(frozen=True)
 class ScanConfig:
-    reversal_scan_list: tuple[str, ...]
+    reversal_scan_list: tuple[str, ...] = ()  # optional backtest override
     api_rate_limit: int = 30
     tradingview_screens_path: Path = Path("tv-output/all-screens.json")
     tradingview_screens_refresh_command: str | None = None
@@ -174,7 +174,6 @@ def http_json_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> ScanConfig:
     load_dotenv(ENV_PATH)
 
-    reversal_list_raw = os.getenv("REVERSAL_SCAN_LIST", "").strip()
     reversal_scan_list = tuple(
         symbol.strip().upper()
         for symbol in reversal_list_raw.split(",")
@@ -182,7 +181,6 @@ def load_config() -> ScanConfig:
     )
 
     return ScanConfig(
-        reversal_scan_list=reversal_scan_list,
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
         tradingview_screens_refresh_command=os.getenv("TRADINGVIEW_SCREENS_REFRESH_COMMAND", "").strip() or None,
@@ -356,10 +354,14 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     )
 
 
+
+
 def resolve_reversal_scan_list(config: ScanConfig) -> tuple[str, ...]:
+    # Backtest override: if reversal_scan_list is explicitly set, use only those
+    if config.reversal_scan_list:
+        return config.reversal_scan_list
     scan_list_symbols = list(get_scan_list_symbols(config.scan_list_path))
-    manual_symbols = list(config.reversal_scan_list)
-    merged = tuple(dict.fromkeys([*scan_list_symbols, *manual_symbols]))
+    merged = tuple(dict.fromkeys(scan_list_symbols))
     if not merged:
         raise ValueError(
             "Scan list is empty. Build it first:\n"
