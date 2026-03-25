@@ -219,7 +219,7 @@ def resolve_scan_list(config: ScanConfig) -> tuple[str, ...]:
 
     if not config.tradingview_watchlists_refresh_command and config.tradingview_watchlists_path.exists():
         age_seconds = time.time() - config.tradingview_watchlists_path.stat().st_mtime
-        if age_seconds > 28800:
+        if age_seconds > 86400:  # 24h
             age_hours = age_seconds / 3600
             raise ValueError(
                 f"TradingView watchlists file is {age_hours:.1f}h old "

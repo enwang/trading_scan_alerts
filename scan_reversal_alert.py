@@ -313,7 +313,7 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     screens_path = config.tradingview_screens_path
     if not config.tradingview_screens_refresh_command and screens_path.exists():
         age_seconds = time.time() - screens_path.stat().st_mtime
-        if age_seconds > 7200:
+        if age_seconds > 86400:  # 24h:
             age_hours = age_seconds / 3600
             raise ValueError(
                 f"TradingView screens file is {age_hours:.1f}h old ({screens_path}). "
