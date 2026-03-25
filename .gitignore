@@ -5,3 +5,4 @@ node_modules/
 __pycache__/
 tests/__pycache__/
 *.pyc
+.claude/
