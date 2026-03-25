@@ -18,6 +18,11 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
+from telegram_alert_controls import (
+    is_alert_type_muted,
+    load_muted_symbols,
+    process_telegram_commands,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -514,6 +519,10 @@ def save_alert_state(path: Path, state: dict[str, str]) -> None:
 
 
 def should_alert(result: ScanResult, state: dict[str, str], now: datetime) -> bool:
+    if is_alert_type_muted(state, "REVERSAL", now):
+        return False
+    if result.symbol.upper() in load_muted_symbols(state, "REVERSAL", now):
+        return False
     key = f"{result.symbol}:{now.date().isoformat()}"
     return state.get(key) != "sent"
 
@@ -697,6 +706,27 @@ def run() -> int:
 
     while True:
         now = datetime.now(tz=EASTERN)
+
+        try:
+            if process_telegram_commands(
+                bot_token=config.telegram_bot_token,
+                chat_id=config.telegram_chat_id,
+                state=alert_state,
+                now=now,
+                alert_type="REVERSAL",
+                alert_label="reversal",
+                alert_aliases={"reversal", "reversals", "rev"},
+                help_alias_examples=("reversal",),
+                send_confirmation=lambda message: send_alert(
+                    message,
+                    None,
+                    config.telegram_bot_token,
+                    config.telegram_chat_id,
+                ),
+            ):
+                save_alert_state(config.alert_state_path, alert_state)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Telegram control polling failed: {exc}", file=sys.stderr, flush=True)
 
         if not _is_market_hours(now):
             print(
