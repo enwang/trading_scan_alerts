@@ -37,8 +37,6 @@ To get `TELEGRAM_CHAT_ID`, send a message to your bot first, then open:
 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 ```
 
-Both scanners also poll the same Telegram chat for control commands while running. Send `stop --help` in that chat to get the supported commands for that scanner.
-
 4. Optional generic webhook alert:
 
 ```dotenv
@@ -151,18 +149,6 @@ Important: full-market premarket and postmarket scanning requires Polygon snapsh
 
 The scanner sends one alert per symbol per day and stores dedupe state in `alert_state.json`.
 
-Telegram control commands for the reversal scanner:
-
-- `stop --help`
-- `stop reversal`
-- `resume reversal`
-- `stop AAPL`
-- `resume AAPL`
-- `stop reversal AAPL`
-- `resume reversal AAPL`
-
-`stop reversal` mutes the whole reversal alert type for the rest of the trading day. `stop AAPL` mutes only that ticker's reversal alerts for the day.
-
 ## U&R rule
 
 `scan_undercut_rally_alert.py` is a separate scanner for `undercut and Rally` / `U&R`.
@@ -175,25 +161,8 @@ Default behavior:
 - looks for symbols that trade below the previous trading day's low
 - then alerts once the minute high is at least `2%` above the lowest price reached after that undercut
 - can alert again the same day only if the symbol sets a fresh lower intraday low and then rallies again
-- polls the configured Telegram bot chat for control commands before each scan cycle
 - alert timestamps are printed in `PT` by default
 - stores alert state in `undercut_rally_alert_state.json`
-
-Telegram control commands for the U&R scanner:
-
-- `stop --help`
-- `stop ur`
-- `stop AAPL`
-- `stop ur AAPL`
-- `resume ur`
-- `resume AAPL`
-- `resume ur AAPL`
-
-`stop ur` mutes the entire U&R alert type for the rest of the trading day. `stop AAPL` mutes only that ticker's U&R alerts. `resume` removes the corresponding mute on the same day.
-
-## Future Alert Types
-
-Telegram stop/resume handling is now shared in [telegram_alert_controls.py](/Users/welsnake/trading_scan/telegram_alert_controls.py). New alert scripts can reuse that module to get the same `stop --help`, type-level mute, and ticker-level mute behavior without reimplementing Telegram command parsing.
 
 Optional overrides:
 
