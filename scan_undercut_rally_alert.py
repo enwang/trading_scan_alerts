@@ -277,6 +277,7 @@ def evaluate_undercut_rally_scan(
     ordered_bars = sorted(regular_bars, key=lambda bar: bar["t"])
     undercut_low: float | None = None
     undercut_time: datetime | None = None
+    latest_result: ScanResult | None = None
 
     for bar in ordered_bars:
         if undercut_low is None:
@@ -296,7 +297,7 @@ def evaluate_undercut_rally_scan(
         if trigger_price < threshold:
             continue
 
-        return ScanResult(
+        latest_result = ScanResult(
             symbol=symbol,
             previous_low=previous_low,
             previous_close=previous_close,
@@ -307,7 +308,7 @@ def evaluate_undercut_rally_scan(
             rebound_from_low_pct=pct_change(trigger_price, undercut_low),
         )
 
-    return None
+    return latest_result
 
 
 def load_alert_state(path: Path) -> dict[str, str]:
@@ -323,6 +324,10 @@ def save_alert_state(path: Path, state: dict[str, str]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
+def _normalize_alert_low(value: float) -> str:
+    return f"{value:.8f}"
+
+
 def should_alert(result: ScanResult, state: dict[str, str], now: datetime) -> bool:
     key = f"U&R:{result.symbol}:{now.date().isoformat()}"
     raw_value = state.get(key)
@@ -332,12 +337,13 @@ def should_alert(result: ScanResult, state: dict[str, str], now: datetime) -> bo
         last_alerted_low = float(raw_value)
     except ValueError:
         return True
-    return result.undercut_low < last_alerted_low
+    current_low = float(_normalize_alert_low(result.undercut_low))
+    return current_low < last_alerted_low
 
 
 def mark_alert_sent(result: ScanResult, state: dict[str, str], now: datetime) -> None:
     key = f"U&R:{result.symbol}:{now.date().isoformat()}"
-    state[key] = f"{result.undercut_low:.8f}"
+    state[key] = _normalize_alert_low(result.undercut_low)
 
 
 def format_alert(result: ScanResult, now: datetime, config: ScanConfig) -> str:
