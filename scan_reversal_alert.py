@@ -18,6 +18,10 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
+from telegram_alert_controls import (
+    is_alert_type_muted,
+    load_muted_symbols,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -174,12 +178,6 @@ def http_json_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> ScanConfig:
     load_dotenv(ENV_PATH)
 
-    reversal_scan_list = tuple(
-        symbol.strip().upper()
-        for symbol in reversal_list_raw.split(",")
-        if symbol.strip()
-    )
-
     return ScanConfig(
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         tradingview_screens_path=Path(os.getenv("TRADINGVIEW_SCREENS_PATH", "tv-output/all-screens.json")),
@@ -314,7 +312,7 @@ def build_list_phase(phase: str, config: ScanConfig) -> None:
     screens_path = config.tradingview_screens_path
     if not config.tradingview_screens_refresh_command and screens_path.exists():
         age_seconds = time.time() - screens_path.stat().st_mtime
-        if age_seconds > 7200:
+        if age_seconds > 86400:  # 24h:
             age_hours = age_seconds / 3600
             raise ValueError(
                 f"TradingView screens file is {age_hours:.1f}h old ({screens_path}). "
@@ -697,7 +695,6 @@ def run() -> int:
 
     while True:
         now = datetime.now(tz=EASTERN)
-
         if not _is_market_hours(now):
             print(
                 f"Outside market hours ({now.strftime('%H:%M:%S %Z')}), waiting...",

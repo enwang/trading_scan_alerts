@@ -24,6 +24,11 @@ from scan_reversal_alert import (
     http_json_post,
     load_dotenv,
 )
+from telegram_alert_controls import (
+    is_alert_type_muted,
+    load_muted_symbols,
+    process_telegram_commands,
+)
 
 
 _INTERVAL_LOW = 300
@@ -214,7 +219,7 @@ def resolve_scan_list(config: ScanConfig) -> tuple[str, ...]:
 
     if not config.tradingview_watchlists_refresh_command and config.tradingview_watchlists_path.exists():
         age_seconds = time.time() - config.tradingview_watchlists_path.stat().st_mtime
-        if age_seconds > 28800:
+        if age_seconds > 86400:  # 24h
             age_hours = age_seconds / 3600
             raise ValueError(
                 f"TradingView watchlists file is {age_hours:.1f}h old "
@@ -311,7 +316,7 @@ def evaluate_undercut_rally_scan(
     return latest_result
 
 
-def load_alert_state(path: Path) -> dict[str, str]:
+def load_alert_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -320,7 +325,7 @@ def load_alert_state(path: Path) -> dict[str, str]:
         return {}
 
 
-def save_alert_state(path: Path, state: dict[str, str]) -> None:
+def save_alert_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
@@ -328,22 +333,44 @@ def _normalize_alert_low(value: float) -> str:
     return f"{value:.8f}"
 
 
-def should_alert(result: ScanResult, state: dict[str, str], now: datetime) -> bool:
-    key = f"U&R:{result.symbol}:{now.date().isoformat()}"
+def _alert_state_key(symbol: str, now: datetime) -> str:
+    return f"U&R:{symbol}:{now.date().isoformat()}"
+
+
+def should_alert(result: ScanResult, state: dict[str, Any], now: datetime) -> bool:
+    if is_alert_type_muted(state, "U&R", now):
+        return False
+    if result.symbol.upper() in load_muted_symbols(state, "U&R", now):
+        return False
+
+    key = _alert_state_key(result.symbol, now)
     raw_value = state.get(key)
     if raw_value is None:
         return True
+
+    current_low = float(_normalize_alert_low(result.undercut_low))
+    if isinstance(raw_value, dict):
+        try:
+            last_alerted_low = float(raw_value.get("undercut_low", "nan"))
+        except (TypeError, ValueError):
+            return True
+        return current_low < last_alerted_low
+
+    # Older state files stored only the low as a string; preserve the lower-low
+    # dedupe behavior while upgrading to the richer state format on next alert.
     try:
         last_alerted_low = float(raw_value)
-    except ValueError:
+    except (TypeError, ValueError):
         return True
-    current_low = float(_normalize_alert_low(result.undercut_low))
     return current_low < last_alerted_low
 
 
-def mark_alert_sent(result: ScanResult, state: dict[str, str], now: datetime) -> None:
-    key = f"U&R:{result.symbol}:{now.date().isoformat()}"
-    state[key] = _normalize_alert_low(result.undercut_low)
+def mark_alert_sent(result: ScanResult, state: dict[str, Any], now: datetime) -> None:
+    key = _alert_state_key(result.symbol, now)
+    state[key] = {
+        "undercut_low": round(result.undercut_low, 8),
+        "trigger_price": round(result.trigger_price, 8),
+    }
 
 
 def format_alert(result: ScanResult, now: datetime, config: ScanConfig) -> str:
@@ -487,6 +514,27 @@ def run() -> int:
 
     while True:
         now = datetime.now(tz=EASTERN)
+
+        try:
+            if process_telegram_commands(
+                bot_token=config.telegram_bot_token,
+                chat_id=config.telegram_chat_id,
+                state=alert_state,
+                now=now,
+                alert_type="U&R",
+                alert_label="U&R",
+                alert_aliases={"ur", "u&r", "undercut", "undercut-rally"},
+                help_alias_examples=("ur",),
+                send_confirmation=lambda message: send_alert(
+                    message,
+                    None,
+                    config.telegram_bot_token,
+                    config.telegram_chat_id,
+                ),
+            ):
+                save_alert_state(config.alert_state_path, alert_state)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Telegram control polling failed: {exc}", file=sys.stderr, flush=True)
 
         if not _is_market_hours(now):
             print(
