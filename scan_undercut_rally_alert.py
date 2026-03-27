@@ -282,6 +282,7 @@ def evaluate_undercut_rally_scan(
     ordered_bars = sorted(regular_bars, key=lambda bar: bar["t"])
     undercut_low: float | None = None
     undercut_time: datetime | None = None
+    latest_result: ScanResult | None = None
 
     for bar in ordered_bars:
         if undercut_low is None:
@@ -301,7 +302,7 @@ def evaluate_undercut_rally_scan(
         if trigger_price < threshold:
             continue
 
-        return ScanResult(
+        latest_result = ScanResult(
             symbol=symbol,
             previous_low=previous_low,
             previous_close=previous_close,
@@ -312,7 +313,7 @@ def evaluate_undercut_rally_scan(
             rebound_from_low_pct=pct_change(trigger_price, undercut_low),
         )
 
-    return None
+    return latest_result
 
 
 def load_alert_state(path: Path) -> dict[str, Any]:
@@ -326,6 +327,10 @@ def load_alert_state(path: Path) -> dict[str, Any]:
 
 def save_alert_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def _normalize_alert_low(value: float) -> str:
+    return f"{value:.8f}"
 
 
 def _alert_state_key(symbol: str, now: datetime) -> str:
@@ -343,14 +348,21 @@ def should_alert(result: ScanResult, state: dict[str, Any], now: datetime) -> bo
     if raw_value is None:
         return True
 
+    current_low = float(_normalize_alert_low(result.undercut_low))
     if isinstance(raw_value, dict):
-        return not (
-            float(raw_value.get("undercut_low", "nan")) == result.undercut_low
-        )
+        try:
+            last_alerted_low = float(raw_value.get("undercut_low", "nan"))
+        except (TypeError, ValueError):
+            return True
+        return current_low < last_alerted_low
 
-    # Older state files stored only the low; treat them as stale state and allow
-    # the next alert to re-establish the richer dedupe signature.
-    return True
+    # Older state files stored only the low as a string; preserve the lower-low
+    # dedupe behavior while upgrading to the richer state format on next alert.
+    try:
+        last_alerted_low = float(raw_value)
+    except (TypeError, ValueError):
+        return True
+    return current_low < last_alerted_low
 
 
 def mark_alert_sent(result: ScanResult, state: dict[str, Any], now: datetime) -> None:

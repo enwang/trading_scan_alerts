@@ -512,10 +512,6 @@ def save_alert_state(path: Path, state: dict[str, str]) -> None:
 
 
 def should_alert(result: ScanResult, state: dict[str, str], now: datetime) -> bool:
-    if is_alert_type_muted(state, "REVERSAL", now):
-        return False
-    if result.symbol.upper() in load_muted_symbols(state, "REVERSAL", now):
-        return False
     key = f"{result.symbol}:{now.date().isoformat()}"
     return state.get(key) != "sent"
 
@@ -699,8 +695,6 @@ def run() -> int:
 
     while True:
         now = datetime.now(tz=EASTERN)
-
-
         if not _is_market_hours(now):
             print(
                 f"Outside market hours ({now.strftime('%H:%M:%S %Z')}), waiting...",
