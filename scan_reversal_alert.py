@@ -18,11 +18,6 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
-from telegram_alert_controls import (
-    is_alert_type_muted,
-    load_muted_symbols,
-)
-
 
 EASTERN = ZoneInfo("America/New_York")
 PACIFIC = ZoneInfo("America/Los_Angeles")
