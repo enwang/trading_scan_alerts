@@ -24,12 +24,6 @@ from scan_reversal_alert import (
     http_json_post,
     load_dotenv,
 )
-from telegram_alert_controls import (
-    is_alert_type_muted,
-    load_muted_symbols,
-    process_telegram_commands,
-)
-
 
 _INTERVAL_LOW = 300
 _INTERVAL_MEDIUM = 180
@@ -338,11 +332,6 @@ def _alert_state_key(symbol: str, now: datetime) -> str:
 
 
 def should_alert(result: ScanResult, state: dict[str, Any], now: datetime) -> bool:
-    if is_alert_type_muted(state, "U&R", now):
-        return False
-    if result.symbol.upper() in load_muted_symbols(state, "U&R", now):
-        return False
-
     key = _alert_state_key(result.symbol, now)
     raw_value = state.get(key)
     if raw_value is None:
@@ -514,27 +503,6 @@ def run() -> int:
 
     while True:
         now = datetime.now(tz=EASTERN)
-
-        try:
-            if process_telegram_commands(
-                bot_token=config.telegram_bot_token,
-                chat_id=config.telegram_chat_id,
-                state=alert_state,
-                now=now,
-                alert_type="U&R",
-                alert_label="U&R",
-                alert_aliases={"ur", "u&r", "undercut", "undercut-rally"},
-                help_alias_examples=("ur",),
-                send_confirmation=lambda message: send_alert(
-                    message,
-                    None,
-                    config.telegram_bot_token,
-                    config.telegram_chat_id,
-                ),
-            ):
-                save_alert_state(config.alert_state_path, alert_state)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Telegram control polling failed: {exc}", file=sys.stderr, flush=True)
 
         if not _is_market_hours(now):
             print(
