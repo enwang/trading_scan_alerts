@@ -38,7 +38,7 @@ class ScanConfig:
     watchlist_names: tuple[str, ...] = ("Focus", "Strong", "Next")
     holding_watchlist_name: str = "Holding"
     holding_section_names: tuple[str, ...] = ("IDEA", "HOLDING")
-    enabled: bool = True
+    enabled: bool = False
     rebound_pct: float = 0.5
     api_rate_limit: int = 30
     poll_seconds: int = 60
@@ -92,7 +92,7 @@ def load_config() -> ScanConfig:
             for section in os.getenv("UR_HOLDING_SECTION_NAMES", "IDEA,HOLDING").split(",")
             if section.strip()
         ) or ("IDEA", "HOLDING"),
-        enabled=os.getenv("UR_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"},
+        enabled=os.getenv("UR_ENABLED", "false").strip().lower() not in {"0", "false", "no", "off"},
         rebound_pct=float(os.getenv("UR_REBOUND_PCT", "0.5")),
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         poll_seconds=int(os.getenv("POLL_SECONDS", "60")),

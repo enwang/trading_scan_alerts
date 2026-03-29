@@ -155,6 +155,7 @@ The scanner sends one alert per symbol per day and stores dedupe state in `alert
 
 Default behavior:
 
+- is disabled by default unless `UR_ENABLED=true`
 - reads TradingView watchlists from `tv-output/all-lists.json`
 - scans watchlists `Focus`, `Strong`, and `Next`
 - also includes symbols from the `IDEA` and `HOLDING` sections inside the `Holding` watchlist
@@ -167,6 +168,7 @@ Default behavior:
 Optional overrides:
 
 ```dotenv
+UR_ENABLED=true
 TRADINGVIEW_WATCHLISTS_REFRESH_COMMAND=npm run tv:lists
 UR_HOLDING_WATCHLIST_NAME=Holding
 UR_HOLDING_SECTION_NAMES=IDEA,HOLDING
