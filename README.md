@@ -159,7 +159,7 @@ Default behavior:
 - scans watchlists `Focus`, `Strong`, and `Next`
 - also includes symbols from the `IDEA` and `HOLDING` sections inside the `Holding` watchlist
 - looks for symbols that trade below the previous trading day's low
-- then alerts once the minute high is at least `2%` above the lowest price reached after that undercut
+- then alerts once price reclaims the previous trading day's low and the minute high reaches at least `0.5%` above that prior low
 - can alert again the same day only if the symbol sets a fresh lower intraday low and then rallies again
 - alert timestamps are printed in `PT` by default
 - stores alert state in `undercut_rally_alert_state.json`
@@ -171,7 +171,7 @@ TRADINGVIEW_WATCHLISTS_REFRESH_COMMAND=npm run tv:lists
 UR_HOLDING_WATCHLIST_NAME=Holding
 UR_HOLDING_SECTION_NAMES=IDEA,HOLDING
 UR_WATCHLIST_NAMES=Focus,Strong,Next
-UR_REBOUND_PCT=2.0
+UR_REBOUND_PCT=0.5
 UR_ALERT_STATE_PATH=undercut_rally_alert_state.json
 ```
 

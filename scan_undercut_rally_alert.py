@@ -38,7 +38,8 @@ class ScanConfig:
     watchlist_names: tuple[str, ...] = ("Focus", "Strong", "Next")
     holding_watchlist_name: str = "Holding"
     holding_section_names: tuple[str, ...] = ("IDEA", "HOLDING")
-    rebound_pct: float = 2.0
+    enabled: bool = True
+    rebound_pct: float = 0.5
     api_rate_limit: int = 30
     poll_seconds: int = 60
     alert_webhook_url: str | None = None
@@ -91,7 +92,8 @@ def load_config() -> ScanConfig:
             for section in os.getenv("UR_HOLDING_SECTION_NAMES", "IDEA,HOLDING").split(",")
             if section.strip()
         ) or ("IDEA", "HOLDING"),
-        rebound_pct=float(os.getenv("UR_REBOUND_PCT", "2.0")),
+        enabled=os.getenv("UR_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"},
+        rebound_pct=float(os.getenv("UR_REBOUND_PCT", "0.5")),
         api_rate_limit=int(os.getenv("API_RATE_LIMIT", "30")),
         poll_seconds=int(os.getenv("POLL_SECONDS", "60")),
         alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL", "").strip() or None,
@@ -253,8 +255,10 @@ def compute_scan_interval(
         distance_to_break = abs(pct_change(last_price, previous_low))
         return _INTERVAL_MEDIUM if distance_to_break <= 1.0 else _INTERVAL_LOW
 
-    rebound_pct = pct_change(last_price, undercut_low)
-    progress = rebound_pct / max(config.rebound_pct, 0.01)
+    target = previous_low * (1 + (config.rebound_pct / 100))
+    distance_total = target - undercut_low
+    distance_covered = last_price - undercut_low
+    progress = distance_covered / max(distance_total, 0.01)
     if progress >= 0.7:
         return _INTERVAL_URGENT
     if progress >= 0.3:
@@ -279,19 +283,17 @@ def evaluate_undercut_rally_scan(
     latest_result: ScanResult | None = None
 
     for bar in ordered_bars:
+        if bar["l"] < previous_low:
+            if undercut_low is None or bar["l"] < undercut_low:
+                undercut_low = bar["l"]
+                undercut_time = datetime.fromtimestamp(bar["t"] / 1000, tz=UTC).astimezone(EASTERN)
+            continue
+
+        # bar["l"] >= previous_low: bar is fully above prior-day support
         if undercut_low is None:
-            if bar["l"] >= previous_low:
-                continue
-            undercut_low = bar["l"]
-            undercut_time = datetime.fromtimestamp(bar["t"] / 1000, tz=UTC).astimezone(EASTERN)
-            continue
+            continue  # no undercut has occurred yet
 
-        if bar["l"] < undercut_low:
-            undercut_low = bar["l"]
-            undercut_time = datetime.fromtimestamp(bar["t"] / 1000, tz=UTC).astimezone(EASTERN)
-            continue
-
-        threshold = undercut_low * (1 + (config.rebound_pct / 100))
+        threshold = previous_low * (1 + (config.rebound_pct / 100))
         trigger_price = bar["h"]
         if trigger_price < threshold:
             continue
@@ -365,16 +367,17 @@ def mark_alert_sent(result: ScanResult, state: dict[str, Any], now: datetime) ->
 def format_alert(result: ScanResult, now: datetime, config: ScanConfig) -> str:
     undercut_time_pt = result.undercut_time.astimezone(PACIFIC).strftime("%H:%M:%S")
     trigger_time_pt = result.trigger_time.astimezone(PACIFIC).strftime("%H:%M:%S")
+    undercut_depth_pct = abs(pct_change(result.undercut_low, result.previous_low))
+    reclaim_margin_pct = pct_change(result.trigger_price, result.previous_low)
     return (
         f"{result.symbol} U&R alert\n"
         f"Date: {now.strftime('%Y-%m-%d')}\n"
         f"Undercut time: {undercut_time_pt} PT\n"
         f"Trigger time: {trigger_time_pt} PT\n"
         f"Previous low: {result.previous_low:.2f}\n"
-        f"Current low: {result.undercut_low:.2f}\n"
-        f"Trigger price: {result.trigger_price:.2f}\n"
-        f"Rebound from current low: +{result.rebound_from_low_pct:.2f}% "
-        f"(rule: {config.rebound_pct:.2f}%+)\n"
+        f"Undercut low: {result.undercut_low:.2f} (-{undercut_depth_pct:.2f}%)\n"
+        f"Trigger price: {result.trigger_price:.2f} (+{reclaim_margin_pct:.2f}% above prev low)\n"
+        f"Rebound from low: +{result.rebound_from_low_pct:.2f}%\n"
         f"Previous close: {result.previous_close:.2f}"
     )
 
@@ -451,14 +454,54 @@ def prefetch_previous_bars(
     return states
 
 
+def _print_backtest_result(result: ScanResult, config: ScanConfig, now: datetime) -> None:
+    """Print-only send for backtest — no Telegram, no webhook."""
+    print(format_alert(result, now, config), flush=True)
+    print("---", flush=True)
+
+
 def run() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backtest-symbol")
     parser.add_argument("--backtest-date")
+    parser.add_argument("--backtest-watchlist", action="store_true",
+                        help="Run backtest against all watchlist symbols (requires --backtest-date)")
+    parser.add_argument("--backtest-summary", action="store_true",
+                        help="Print a compact summary table after batch backtest")
     args = parser.parse_args()
 
     config = load_config()
+    if not config.enabled:
+        print("U&R scanner disabled via UR_ENABLED=false", flush=True)
+        return 0
     client = YFinanceClient()
+
+    if args.backtest_date and args.backtest_watchlist:
+        now = datetime.strptime(args.backtest_date, "%Y-%m-%d").replace(tzinfo=EASTERN)
+        symbols = load_watchlist_symbols(config)
+        print(f"Backtest {args.backtest_date}: {len(symbols)} symbols, "
+              f"rebound_pct={config.rebound_pct}%",
+              flush=True)
+        matches = scan_once_backtest(client, config, now, symbols)
+        if not matches:
+            print(f"No U&R triggers on {args.backtest_date}")
+            return 0
+        if args.backtest_summary:
+            print(f"\n{'Symbol':<8} {'Prev_Low':>9} {'Undcut_Low':>10} {'Depth%':>7} "
+                  f"{'Trigger':>9} {'Reclaim%':>9} {'Trigger_ET'}")
+            print("-" * 68)
+            for r in matches:
+                depth = abs(pct_change(r.undercut_low, r.previous_low))
+                reclaim = pct_change(r.trigger_price, r.previous_low)
+                t_et = r.trigger_time.strftime("%H:%M")
+                print(f"{r.symbol:<8} {r.previous_low:>9.2f} {r.undercut_low:>10.2f} "
+                      f"{depth:>6.1f}% {r.trigger_price:>9.2f} "
+                      f"{reclaim:>+8.1f}%  {t_et} ET")
+            print(f"\nTotal: {len(matches)} alert(s) on {args.backtest_date}")
+        else:
+            for result in matches:
+                _print_backtest_result(result, config, now)
+        return 0
 
     if args.backtest_symbol and args.backtest_date:
         now = datetime.strptime(args.backtest_date, "%Y-%m-%d").replace(tzinfo=EASTERN)
@@ -468,12 +511,7 @@ def run() -> int:
             print(f"No U&R trigger for {args.backtest_symbol.upper()} on {args.backtest_date}")
             return 0
         for result in matches:
-            send_alert(
-                format_alert(result, now, config),
-                config.alert_webhook_url,
-                config.telegram_bot_token,
-                config.telegram_chat_id,
-            )
+            _print_backtest_result(result, config, now)
         return 0
 
     symbols = resolve_scan_list(config)
