@@ -46,6 +46,7 @@ class ScanConfig:
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     alert_state_path: Path = Path("undercut_rally_alert_state.json")
+    min_market_cap_m: float = 800.0
 
 
 @dataclass
@@ -102,6 +103,7 @@ def load_config() -> ScanConfig:
         alert_state_path=Path(
             os.getenv("UR_ALERT_STATE_PATH", "undercut_rally_alert_state.json")
         ),
+        min_market_cap_m=float(os.getenv("UR_MIN_MARKET_CAP_M", "800.0")),
     )
 
 
@@ -382,6 +384,16 @@ def format_alert(result: ScanResult, now: datetime, config: ScanConfig) -> str:
     )
 
 
+def _get_market_cap_m(symbol: str) -> float | None:
+    """Return market cap in millions, or None if unavailable."""
+    try:
+        import yfinance as yf
+        mc = yf.Ticker(symbol).fast_info.market_cap
+        return mc / 1_000_000 if mc else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def send_alert(
     message: str,
     webhook_url: str | None,
@@ -587,14 +599,22 @@ def run() -> int:
                         config=config,
                     )
                     if result and should_alert(result, alert_state, now):
-                        send_alert(
-                            format_alert(result, now, config),
-                            config.alert_webhook_url,
-                            config.telegram_bot_token,
-                            config.telegram_chat_id,
-                        )
-                        mark_alert_sent(result, alert_state, now)
-                        save_alert_state(config.alert_state_path, alert_state)
+                        market_cap_m = _get_market_cap_m(result.symbol)
+                        if market_cap_m is not None and market_cap_m < config.min_market_cap_m:
+                            print(
+                                f"{result.symbol}: skipped alert (market cap "
+                                f"{market_cap_m:.0f}M < {config.min_market_cap_m:.0f}M threshold)",
+                                flush=True,
+                            )
+                        else:
+                            send_alert(
+                                format_alert(result, now, config),
+                                config.alert_webhook_url,
+                                config.telegram_bot_token,
+                                config.telegram_chat_id,
+                            )
+                            mark_alert_sent(result, alert_state, now)
+                            save_alert_state(config.alert_state_path, alert_state)
                 except Exception as exc:  # noqa: BLE001
                     print(f"{symbol}: scan failed: {exc}", file=sys.stderr, flush=True)
                     state.next_scan_at = time.time() + 60
